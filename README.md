@@ -34,7 +34,7 @@ mobile-app-CUISINIX/
 ├── app/                        Application Flutter (lib/main.dart, android/, pubspec.yaml)
 ├── supabase/
 │   ├── README.md
-│   ├── sql/                    01_schema.sql, 02_ingredients.sql, 03_recipes.sql
+│   ├── sql/                    10 à 50 (base actuelle), 01 à 03 (ancien schéma)
 │   └── functions/
 │       └── quick-responder/    Edge Function de détection d'ingrédients (Gemini)
 └── docs/
@@ -46,7 +46,12 @@ mobile-app-CUISINIX/
     └── RISQUES.md
 ```
 
+## Scripts SQL (`supabase/sql/`)
+
+- **Base actuelle** : les scripts `10_recettes_table.sql`, `20_ingredients.sql`, `30_recettes_supplementaires.sql`, `40_etapes_recettes.sql` et `50_traductions.sql` décrivent la base utilisée par l'application. À exécuter dans cet ordre dans le SQL Editor de Supabase.
+- **Ancien schéma** : `01_schema.sql`, `02_ingredients.sql` et `03_recipes.sql` sont le premier schéma de conception. Il ne correspond plus à la base utilisée ; ils sont conservés à titre d'historique.
+
 ## Démarrage rapide
 
-1. Backend : exécuter les scripts de `supabase/sql/` dans l'ordre, puis déployer `supabase/functions/quick-responder` et y définir le secret `GEMINI_API_KEY` (voir [supabase/README.md](supabase/README.md)).
+1. Backend : exécuter les scripts `10` à `50` de `supabase/sql/` dans l'ordre, puis déployer `supabase/functions/quick-responder` et y définir le secret `GEMINI_API_KEY` (voir [supabase/README.md](supabase/README.md)).
 2. Application : `cd app && flutter pub get && flutter run`.
