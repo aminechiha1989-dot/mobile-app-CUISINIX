@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:math';
 
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
@@ -55,6 +56,8 @@ const Map<String, Map<String, String>> _ui = {
   'fewPhotos': {'fr': 'Seules les 5 premières photos sont analysées.', 'en': 'Only the first 5 photos are analyzed.', 'ar': 'يتم تحليل أول 5 صور فقط.', 'aeb': 'نحلّلو غير أول 5 تصاور.'},
   'openPhotoErr': {'fr': 'Impossible d\'ouvrir la photo : {e}', 'en': 'Could not open the photo: {e}', 'ar': 'تعذّر فتح الصورة: {e}', 'aeb': 'ما نجمناش نحلّو التصويرة: {e}'},
   'analysisErr': {'fr': 'Analyse impossible : {e}', 'en': 'Analysis failed: {e}', 'ar': 'تعذّر التحليل: {e}', 'aeb': 'ما نجمناش نحلّلو: {e}'},
+  'limitDevice': {'fr': 'Limite de {n} photos par jour atteinte. Reviens demain ou choisis tes ingrédients à la main.', 'en': 'Daily limit of {n} photos reached. Come back tomorrow or pick your ingredients by hand.', 'ar': 'تم بلوغ الحد اليومي ({n} صور). عد غدًا أو اختر مكوّناتك يدويًا.', 'aeb': 'وصلت للحد اليومي ({n} تصاور). ارجع غدوة وإلا اختار المكوّنات بيدك.'},
+  'limitGlobal': {'fr': 'Le scan est très sollicité aujourd\'hui. Réessaie plus tard ou choisis tes ingrédients à la main.', 'en': 'Scanning is very busy today. Try again later or pick your ingredients by hand.', 'ar': 'خدمة المسح عليها ضغط كبير اليوم. أعد المحاولة لاحقًا أو اختر مكوّناتك يدويًا.', 'aeb': 'السكان عليه برشا ضغط اليوم. عاود بعد شوية وإلا اختار المكوّنات بيدك.'},
   'noneFound': {'fr': 'Aucun ingrédient reconnu. Tu peux les cocher à la main.', 'en': 'No ingredient recognized. You can tick them manually.', 'ar': 'لم يتم التعرف على أي مكوّن. يمكنك اختيارها يدويا.', 'aeb': 'ما عرفنا حتى مكوّن. تنجم تختارهم بيدك.'},
   'detected': {'fr': '{n} ingrédient(s) détecté(s){x}.', 'en': '{n} ingredient(s) detected{x}.', 'ar': 'تم اكتشاف {n} مكوّن{x}.', 'aeb': 'لقينا {n} مكوّن{x}.'},
   'failedPhotos': {'fr': ' ({n} photo(s) en échec)', 'en': ' ({n} photo(s) failed)', 'ar': ' ({n} صور فشلت)', 'aeb': ' ({n} تصاور فشلو)'},
@@ -238,6 +241,29 @@ Future<void> setLanguage(String code) async {
   } catch (_) {}
 }
 
+const appVersion = '0.2.0';
+
+// Identifiant anonyme de l'appareil (aucune donnée personnelle) : sert à compter
+// les utilisateurs et à limiter le nombre de scans par jour.
+String deviceId = '';
+
+Future<String> _loadOrCreateDeviceId() async {
+  const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
+  try {
+    final prefs = await SharedPreferences.getInstance();
+    final saved = prefs.getString('device_id');
+    if (saved != null && RegExp(r'^[A-Za-z0-9_-]{16,64}$').hasMatch(saved)) {
+      return saved;
+    }
+    final rnd = Random.secure();
+    final id = List.generate(32, (_) => chars[rnd.nextInt(chars.length)]).join();
+    await prefs.setString('device_id', id);
+    return id;
+  } catch (_) {
+    return '';
+  }
+}
+
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   var askLanguage = true;
@@ -250,6 +276,13 @@ Future<void> main() async {
     }
   } catch (_) {}
   await Supabase.initialize(url: supabaseUrl, anonKey: supabaseAnonKey);
+  deviceId = await _loadOrCreateDeviceId();
+  if (deviceId.isNotEmpty) {
+    // Enregistrement anonyme de l'appareil, sans bloquer le démarrage
+    Supabase.instance.client
+        .rpc('register_device', params: {'p_device': deviceId, 'p_version': appVersion})
+        .then((_) {}, onError: (_) {});
+  }
   runApp(CuisinixApp(askLanguage: askLanguage));
 }
 
@@ -846,6 +879,7 @@ class _RecipesPageState extends State<RecipesPage> {
     final foundPacks = <int, int>{}; // id produit -> nombre d'exemplaires
     var failures = 0;
     String? lastError;
+    String limitMsg = '';
 
     for (final x in files) {
       try {
@@ -856,6 +890,7 @@ class _RecipesPageState extends State<RecipesPage> {
         final res = await Supabase.instance.client.functions.invoke(
           'quick-responder', // nom attribué par Supabase à la fonction de détection
           body: {
+            'device_id': deviceId,
             'image_base64': base64Encode(bytes),
             'media_type': mime,
             'known': _known,
@@ -878,6 +913,19 @@ class _RecipesPageState extends State<RecipesPage> {
             }
           }
         }
+      } on FunctionException catch (e) {
+        if (e.status == 429) {
+          // Limite quotidienne (par appareil ou globale) atteinte : on arrête là
+          final d = e.details;
+          final code = d is Map ? '${d['code']}' : 'device_limit';
+          final limit = d is Map && d['limit'] != null ? '${d['limit']}' : '10';
+          limitMsg = code == 'global_limit'
+              ? t('limitGlobal')
+              : t('limitDevice', {'n': limit});
+          break;
+        }
+        failures++;
+        lastError = '$e';
       } catch (e) {
         failures++;
         lastError = '$e';
@@ -904,6 +952,10 @@ class _RecipesPageState extends State<RecipesPage> {
       }
     });
 
+    if (limitMsg.isNotEmpty && found.isEmpty && foundPacks.isEmpty) {
+      _snack(limitMsg);
+      return;
+    }
     if (failures == files.length) {
       _snack(t('analysisErr', {'e': '$lastError'}));
       return;
@@ -913,7 +965,8 @@ class _RecipesPageState extends State<RecipesPage> {
     } else {
       final packs = foundPacks.values.fold<int>(0, (a, b) => a + b);
       final extra = (packs > 0 ? t('withProducts', {'p': '$packs'}) : '') +
-          (failures > 0 ? t('failedPhotos', {'n': '$failures'}) : '');
+          (failures > 0 ? t('failedPhotos', {'n': '$failures'}) : '') +
+          (limitMsg.isNotEmpty ? '\n$limitMsg' : '');
       _snack(t('detected', {'n': '${detectedNames.length}', 'x': extra}));
     }
     await _editPantry();

@@ -13,10 +13,34 @@ const json = (body: unknown, status = 200) =>
     headers: { ...cors, "Content-Type": "application/json" },
   });
 
+// Limites d'usage (protègent le quota gratuit de Gemini). Réglables via les secrets
+// DEVICE_DAILY_LIMIT et GLOBAL_DAILY_LIMIT de la fonction. Une "analyse" = une photo.
+const DEVICE_DAILY_LIMIT = Number(Deno.env.get("DEVICE_DAILY_LIMIT") ?? 10);
+const GLOBAL_DAILY_LIMIT = Number(Deno.env.get("GLOBAL_DAILY_LIMIT") ?? 500);
+const LEGACY_DAILY_LIMIT = 100; // anciennes versions de l'app, sans identifiant d'appareil
+
+async function rpc(name: string, args: Record<string, unknown>): Promise<unknown> {
+  const url = Deno.env.get("SUPABASE_URL");
+  const key = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+  if (!url || !key) throw new Error("Configuration Supabase manquante");
+  const r = await fetch(`${url}/rest/v1/rpc/${name}`, {
+    method: "POST",
+    headers: { apikey: key, Authorization: `Bearer ${key}`, "content-type": "application/json" },
+    body: JSON.stringify(args),
+  });
+  if (!r.ok) throw new Error(`rpc ${name} ${r.status}`);
+  return await r.json();
+}
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
+  let deviceId = "";
+  let reserved = false;
   try {
-    const { image_base64, media_type, known, products } = await req.json();
+    const { image_base64, media_type, known, products, device_id } = await req.json();
+    deviceId = typeof device_id === "string" && /^[A-Za-z0-9_-]{16,64}$/.test(device_id)
+      ? device_id
+      : "legacy";
     const allowed = ["image/jpeg", "image/png", "image/webp"];
     if (typeof image_base64 !== "string" || image_base64.length === 0 || image_base64.length > 4_000_000) {
       return json({ error: "Image invalide ou trop lourde" }, 400);
@@ -40,6 +64,26 @@ Deno.serve(async (req) => {
 
     const apiKey = Deno.env.get("GEMINI_API_KEY");
     if (!apiKey) return json({ error: "Clé API manquante côté serveur" }, 500);
+
+    // Réserve une analyse pour cet appareil (limite par jour + limite globale)
+    let quota: unknown;
+    try {
+      quota = await rpc("consume_scan", {
+        p_device: deviceId,
+        p_device_limit: deviceId === "legacy" ? LEGACY_DAILY_LIMIT : DEVICE_DAILY_LIMIT,
+        p_global_limit: GLOBAL_DAILY_LIMIT,
+      });
+    } catch (e) {
+      console.error(e);
+      return json({ error: "Service momentanément indisponible", code: "unavailable" }, 503);
+    }
+    if (quota === "device_limit") {
+      return json({ error: "Limite quotidienne atteinte", code: "device_limit", limit: DEVICE_DAILY_LIMIT }, 429);
+    }
+    if (quota === "global_limit") {
+      return json({ error: "Service très sollicité aujourd'hui", code: "global_limit" }, 429);
+    }
+    reserved = true;
 
     let prompt =
       `Voici une photo d'ingrédients de cuisine et de produits d'épicerie. ` +
@@ -79,6 +123,8 @@ Deno.serve(async (req) => {
     if (!resp.ok) {
       const detail = await resp.text();
       console.error("Gemini error", resp.status, detail);
+      await rpc("refund_scan", { p_device: deviceId }).catch(() => {});
+      reserved = false;
       return json({ error: resp.status === 429 ? "Limite gratuite atteinte, réessaie plus tard" : "Échec de l'analyse de l'image" }, 502);
     }
 
@@ -118,6 +164,7 @@ Deno.serve(async (req) => {
     return json({ ingredients, products: productsOut });
   } catch (e) {
     console.error(e);
+    if (reserved) await rpc("refund_scan", { p_device: deviceId }).catch(() => {});
     return json({ error: "Erreur serveur" }, 500);
   }
 });
